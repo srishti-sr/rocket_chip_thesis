@@ -250,11 +250,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   /** TileLink port to memory. */
   val (tl_out, edge_out) = outer.masterNode.out(0)
 
-  /** TileLink port as ITIM memory.
-    * if [[outer.slaveNode]] is not connected [[outer.slaveNode.in]] will be empty.
-    *
-    * wes: Option.unzip does not exist :-(
-    */
   val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
 
   val tECC = cacheParams.tagCode
@@ -286,20 +281,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
   /** tag hit vector to indicate hit which way. */
   val s1_tag_hit = Wire(Vec(nWays, Bool()))
-  /** CPU I$ Hit in stage 1.
-    *
-    * @note
-    * for logic in `Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))`,
-    * there are two different types based on latency:
-    *
-    * if latency is 1: `s1_slaveValid === false.B` and `addrMaybeInScratchpad(io.s1_paddr) === false.B` ,
-    *                   since in this case, ITIM must be empty.
-    *
-    * if latency is 2: if `s1_slaveValid` is true, this SRAM accessing is coming from [[tl_in]], so it will hit.
-    *                  if `s1_slaveValid` is false, but CPU is accessing memory range in scratchpad address, it will hit by default.
-    *                  Hardware won't guarantee this access will access to a data which have been written in ITIM.
-    *
-    * @todo seem CPU access are both processed by `s1_tag_hit` and `Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))`?
     */
   val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))
   dontTouch(s1_hit)
@@ -440,33 +421,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   require(tl_out.d.bits.data.getWidth % wordBits == 0)
 
-  /** Data SRAM
-    *
-    * banked with TileLink beat bytes / CPU fetch bytes,
-    * indexed with [[index]] and multi-beats cycle,
-    * content with `eccError ## wordBits` after ECC.
-    * {{{
-    * │                          │xx│xxxxxx│xxx│x│xx│
-    *                                            ↑word
-    *                                          ↑bank
-    *                            ↑way
-    *                               └─set──┴─offset─┘
-    *                               └────row───┘
-    *}}}
-    * Note:
-    *  Data SRAM is indexed with virtual memory(vaddr[11:2]),
-    *  - vaddr[11:3]->row,
-    *  - vaddr[2]->bank=i
-    *  - Cache line size = refillCycels(8) * bank(2) * datasize(4 bytes) = 64 bytes
-    *  - data width = 32
-    *
-    *  read:
-    *      read happens in stage 0
-    *
-    *  write:
-    *    It takes 8 beats to refill 16 instruction in each refilling cycle.
-    *    Data_array receives data[63:0](2 instructions) at once,they will be allocated in deferent bank according to vaddr[2]
-    */
   val data_arrays = Seq.tabulate(tl_out.d.bits.data.getWidth / wordBits) {
     i =>
       DescribedSRAM(
@@ -536,16 +490,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   /** ECC error happened, correctable or uncorrectable, ask CPU to replay. */
   val s2_disparity = s2_tag_disparity || s2_data_decoded.error
   /** access hit in ITIM, if [[s1_slaveValid]], this access is from [[tl_in]], else from CPU [[io]]. */
-  val s1_scratchpad_hit = Mux(s1_slaveValid, lineInScratchpad(scratchpadLine(s1s3_slaveAddr)), addrInScratchpad(io.s1_paddr))
-  /** stage 2 of [[s1_scratchpad_hit]]. */
-  val s2_scratchpad_hit = RegEnable(s1_scratchpad_hit, s1_clk_en)
-  /** ITIM uncorrectable read.
-    * `s2_scratchpad_hit`: processing a scratchpad read(from [[tl_in]] or [[io]])
-    * `s2_data_decoded.uncorrectable`: read a uncorrectable data.
-    * `s2_valid`: [[io]] non-canceled read.
-    * `(s2_slaveValid && !s2_full_word_write)`: [[tl_in]] read or write a word with wormhole.
-    *                                           if write a full word, even stage 2 read uncorrectable.
-    *                                           stage 3 full word write will recovery this.
     */
   val s2_report_uncorrectable_error = s2_scratchpad_hit && s2_data_decoded.uncorrectable && (s2_valid || (s2_slaveValid && !s1s2_full_word_write))
   /** ECC uncorrectable address, send to Bus Error Unit. */
@@ -592,25 +536,6 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   io.keep_clock_enabled :=
     tl_in.map(tl => tl.a.valid || tl.d.valid || s1_slaveValid || s2_slaveValid || s3_slaveValid).getOrElse(false.B) || // ITIM
     s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding // I$
-
-  /** index to access [[data_arrays]] and [[tag_array]].
-    * @note
-    * if [[untagBits]] > [[pgIdxBits]] in
-    * {{{
-    *                        ┌──idxBits──┐
-    *                        ↓           ↓
-    * │          tag         │    set    │offset│
-    * │              pageTag     │     pageIndex│
-    *                        ↑   ↑       ↑      │
-    *                   untagBits│  blockOffBits│
-    *                       pgIdxBits    │
-    *                        └msb┴──lsb──┘
-    *                        vaddr paddr
-    * }}}
-    *
-    * else use paddr directly.
-    * Note: if [[untagBits]] > [[pgIdxBits]], there will be a alias issue which isn't addressend by the icache yet.
-    */
   def index(vaddr: UInt, paddr: UInt) = {
     /** [[paddr]] as LSB to be used for VIPT. */
     val lsbs = paddr(pgUntagBits-1, blockOffBits)
