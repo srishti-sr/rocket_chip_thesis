@@ -859,8 +859,8 @@ class ICacheModule_2(outer: ICache) extends LazyModuleImp(outer)
 }
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
-  lazy val module1 = new ICacheModule1(this)
-  lazy val module2 = new ICacheModule2(this)
+  lazy val module1 = new ICacheModule_1(this)
+  lazy val module2 = new ICacheModule_2(this)
   val dataOut1 = module1.io.output 
   val dataOut2 = module2.io.output
   val finalOutput = Mux(paddr(untagbits-1,untagbits-2), dataOut1, dataOut2)
