@@ -244,7 +244,7 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
 /**Division 1`*/
 class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
-  override val cacheParams = outer.icacheParams // Use the local parameters
+  override val cacheParams = outer.icacheParams.copy(ways = outerParams.ways / 2)// Use the local parameters
 
   /** IO between Core and ICache. */
   val io = IO(new ICacheBundle(outer))
@@ -552,7 +552,7 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
 /**Division 2*/
 class ICacheModule_2(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
-  override val cacheParams = outer.icacheParams // Use the local parameters
+  override val cacheParams = outer.icacheParams.copy(ways = outerParams.ways / 2) // Use the local parameters
 
   /** IO between Core and ICache. */
   val io = IO(new ICacheBundle(outer))
