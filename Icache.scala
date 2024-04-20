@@ -121,6 +121,8 @@ class ICacheErrors(implicit p: Parameters) extends CoreBundle()(p)
   */
 class ICache(val icacheParams: ICacheParams, val staticIdForMetadataUseOnly: Int)(implicit p: Parameters) extends LazyModule {
   lazy val module = new ICacheModule(this)
+  lazy val module = new ICacheModule_1(this)
+  lazy val module = new ICacheModule_2(this)
 
   /** Diplomatic hartid bundle used for ITIM. */
   val hartIdSinkNodeOpt = icacheParams.itimAddr.map(_ => BundleBridgeSink[UInt]())
@@ -239,8 +241,8 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
   /** I$ miss or ITIM access will still enable clock even [[ICache]] is asked to be gated. */
   val keep_clock_enabled = Output(Bool())
 }
-
-class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
+/**Division 1`*/
+class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
   override val cacheParams = outer.icacheParams // Use the local parameters
 
@@ -580,3 +582,348 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   property.cover(error_cross_covers)
 }
+/**Division 2*/
+class ICacheModule_2(outer: ICache) extends LazyModuleImp(outer)
+    with HasL1ICacheParameters {
+  override val cacheParams = outer.icacheParams // Use the local parameters
+
+  /** IO between Core and ICache. */
+  val io = IO(new ICacheBundle(outer))
+
+  /** TileLink port to memory. */
+  val (tl_out, edge_out) = outer.masterNode.out(0)
+
+  val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
+
+  val tECC = cacheParams.tagCode
+  val dECC = cacheParams.dataCode
+
+  require(isPow2(nSets) && isPow2(nWays))
+  require(!usingVM || outer.icacheParams.itimAddr.isEmpty || pgIdxBits >= untagBits,
+    s"When VM and ITIM are enabled, I$$ set size must not exceed ${1<<(pgIdxBits-10)} KiB; got ${(outer.size/nWays)>>10} KiB")
+
+  /** if this ICache can be used as ITIM, which hart it belongs to. */
+  val io_hartid = outer.hartIdSinkNodeOpt.map(_.bundle)
+  /** @todo tile Memory mapping I/O base address? */
+  val io_mmio_address_prefix = outer.mmioAddressPrefixSinkNodeOpt.map(_.bundle)
+  /** register indicates wheather ITIM is enabled. */
+  val scratchpadOn = RegInit(false.B)
+  val s0_slaveValid = false.B
+  val s1_slaveValid = RegNext(s0_slaveValid, false.B)
+  val s2_slaveValid = RegNext(s1_slaveValid, false.B)
+  val s3_slaveValid = RegNext(false.B)
+
+  /** valid signal for CPU accessing cache in stage 0. */
+  val s0_valid = io.req.fire
+  /** virtual address from CPU in stage 0. */
+  val s0_vaddr = io.req.bits.addr
+
+  /** valid signal for stage 1, drived by s0_valid.*/
+  val s1_valid = RegInit(false.B)
+  /** virtual address from CPU in stage 1. */
+  val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
+  /** tag hit vector to indicate hit which way. */
+  val s1_tag_hit = Wire(Vec(nWays, Bool()))
+    */
+  val s1_hit = s1_tag_hit.reduce(_||_) || Mux(s1_slaveValid, true.B, addrMaybeInScratchpad(io.s1_paddr))
+  dontTouch(s1_hit)
+  val s2_valid = RegNext(s1_valid && !io.s1_kill, false.B)
+  val s2_hit = RegNext(s1_hit)
+
+  /** status register to indicate a cache flush. */
+  val invalidated = Reg(Bool())
+  val refill_valid = RegInit(false.B)
+  /** register to indicate [[tl_out]] is performing a hint.
+   *  prefetch only happens after refilling
+   * */
+  val send_hint = RegInit(false.B)
+  /** indicate [[tl_out]] is performing a refill. */
+  val refill_fire = tl_out.a.fire && !send_hint
+  /** register to indicate there is a outstanding hint. */
+  val hint_outstanding = RegInit(false.B)
+  /** [[io]] access L1 I$ miss. */
+  val s2_miss = s2_valid && !s2_hit && !io.s2_kill
+  /** forward signal to stage 1, permit stage 1 refill. */
+  val s1_can_request_refill = !(s2_miss || refill_valid)
+  /** real refill signal, stage 2 miss, and was permit to refill in stage 1.
+    * Since a miss will trigger burst.
+    * miss under miss won't trigger another burst.
+    */
+  val s2_request_refill = s2_miss && RegNext(s1_can_request_refill)
+  val refill_paddr = RegEnable(io.s1_paddr, s1_valid && s1_can_request_refill)
+  val refill_vaddr = RegEnable(s1_vaddr, s1_valid && s1_can_request_refill)
+  val refill_tag = refill_paddr >> pgUntagBits
+  val refill_idx = index(refill_vaddr, refill_paddr)
+  /** AccessAckData, is refilling I$, it will block request from CPU. */
+  val refill_one_beat = tl_out.d.fire && edge_out.hasData(tl_out.d.bits)
+
+  /** block request from CPU when refill or scratch pad access. */
+  io.req.ready := !(refill_one_beat || s0_slaveValid || s3_slaveValid)
+  s1_valid := s0_valid
+
+  val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
+  /** at last beat of `tl_out.d.fire`, finish refill. */
+  val refill_done = refill_one_beat && d_done
+  /** scratchpad is writing data. block refill. */
+  tl_out.d.ready := !s3_slaveValid
+  require (edge_out.manager.minLatency > 0)
+
+  /** way to be replaced, implemented with a hardcoded random replacement algorithm */
+  val repl_way = if (isDM) 0.U else {
+    // pick a way that is not used by the scratchpad
+    val v0 = LFSR(16, refill_fire)(log2Up(nWays)-1,0)
+    var v = v0
+    for (i <- log2Ceil(nWays) - 1 to 0 by -1) {
+      val mask = nWays - (BigInt(1) << (i + 1))
+      v = v | (lineInScratchpad(Cat(v0 | mask.U, refill_idx)) << i)
+    }
+    assert(!lineInScratchpad(Cat(v, refill_idx)))
+    v
+  }
+
+/**  Tag SRAM, indexed with virtual memory,
+ *   content with `refillError ## tag[19:0]` after ECC
+ * */
+  val tag_array  = DescribedSRAM(
+    name = "tag_array",
+    desc = "ICache Tag Array",
+    size = nSets,
+    data = Vec(nWays, UInt(tECC.width(1 + tagBits).W))
+  )
+  val tag_rdata = tag_array.read(s0_vaddr(untagBits-1,blockOffBits), !refill_done && s0_valid)
+  /** register indicates the ongoing GetAckData transaction is corrupted. */
+  val accruedRefillError = Reg(Bool())
+  /** wire indicates the ongoing GetAckData transaction is corrupted. */
+  val refillError = tl_out.d.bits.corrupt || (refill_cnt > 0.U && accruedRefillError)
+  when (refill_done) {
+    // For AccessAckData, denied => corrupt
+    /** data written to [[tag_array]].
+     *  ECC encoded `refillError ## refill_tag`*/
+    val enc_tag = tECC.encode(Cat(refillError, refill_tag))
+    tag_array.write(refill_idx, VecInit(Seq.fill(nWays){enc_tag}), Seq.tabulate(nWays)(repl_way === _.U))
+
+    ccover(refillError, "D_CORRUPT", "I$ D-channel corrupt")
+  }
+  // notify CPU, I$ has corrupt.
+  io.errors.bus.valid := tl_out.d.fire && (tl_out.d.bits.denied || tl_out.d.bits.corrupt)
+  io.errors.bus.bits  := (refill_paddr >> blockOffBits) << blockOffBits
+
+  /** true indicate this cacheline is valid,
+    * indexed by (wayIndex ## setIndex)
+    * after refill_done and not FENCE.I, (repl_way ## refill_idx) set to true.
+    */
+  val vb_array = RegInit(0.U((nSets*nWays).W))
+  when (refill_one_beat) {
+    accruedRefillError := refillError
+    // clear bit when refill starts so hit-under-miss doesn't fetch bad data
+    vb_array := vb_array.bitSet(Cat(repl_way, refill_idx), refill_done && !invalidated)
+  }
+
+  /** flush cache when invalidate is true. */
+  val invalidate = WireDefault(io.invalidate)
+  when (invalidate) {
+    vb_array := 0.U
+    invalidated := true.B
+  }
+
+  /** wire indicates that tag is correctable or uncorrectable.
+    * will trigger CPU to replay and I$ invalidating, if correctable.
+    */
+  val s1_tag_disparity = Wire(Vec(nWays, Bool()))
+  /** wire indicates that bus has an uncorrectable error.
+    * respond to CPU [[io.resp.bits.ae]], cause [[Causes.fetch_access]].
+    */
+  val s1_tl_error = Wire(Vec(nWays, Bool()))
+  /** how many bits will be fetched by CPU for each fetch. */
+  val wordBits = outer.icacheParams.fetchBytes*8
+  /** a set of raw data read from [[data_arrays]]. */
+  val s1_dout = Wire(Vec(nWays, UInt(dECC.width(wordBits).W)))
+  s1_dout := DontCare
+
+
+  for (i <- 0 until nWays) {
+    val s1_idx = index(s1_vaddr, io.s1_paddr)
+    val s1_tag = io.s1_paddr >> pgUntagBits
+    /** this way is used by scratchpad.
+      * [[tag_array]] corrupted.
+      */
+    val s1_vb = vb_array(Cat(i.U, s1_idx)) && !s1_slaveValid
+    val enc_tag = tECC.decode(tag_rdata(i))
+    /** [[tl_error]] ECC error bit.
+      * [[tag]] of [[tag_array]] access.
+      */
+    val (tl_error, tag) = Split(enc_tag.uncorrected, tagBits)
+    val tagMatch = s1_vb && tag === s1_tag
+    /** tag error happens. */
+    s1_tag_disparity(i) := s1_vb && enc_tag.error
+    /** if tag matched but ecc checking failed, this access will trigger [[Causes.fetch_access]] exception.*/
+    s1_tl_error(i) := tagMatch && tl_error.asBool
+    s1_tag_hit(i) := tagMatch || scratchpadHit
+  }
+  assert(!(s1_valid || s1_slaveValid) || PopCount(s1_tag_hit zip s1_tag_disparity map { case (h, d) => h && !d }) <= 1.U)
+
+  require(tl_out.d.bits.data.getWidth % wordBits == 0)
+
+  val data_arrays = Seq.tabulate(tl_out.d.bits.data.getWidth / wordBits) {
+    i =>
+      DescribedSRAM(
+        name = s"data_arrays_${i}",
+        desc = "ICache Data Array",
+        size = nSets * refillCycles,
+        data = Vec(nWays, UInt(dECC.width(wordBits).W))
+      )
+  }
+
+  for ((data_array , i) <- data_arrays.zipWithIndex) {
+    /**  bank match (vaddr[2]) */
+    def wordMatch(addr: UInt) = addr.extract(log2Ceil(tl_out.d.bits.data.getWidth/8)-1, log2Ceil(wordBits/8)) === i.U
+    def row(addr: UInt) = addr(untagBits-1, blockOffBits-log2Ceil(refillCycles))
+    /** read_enable signal*/
+    val s0_ren = (s0_valid && wordMatch(s0_vaddr)) || (s0_slaveValid && wordMatch(s0_slaveAddr))
+    /** write_enable signal
+     * refill from [[tl_out]] or ITIM write. */
+    val wen = (refill_one_beat && !invalidated) || (s3_slaveValid && wordMatch(s1s3_slaveAddr))
+    /** index to access [[data_array]]. */
+    val mem_idx =
+      // I$ refill. refill_idx[2:0] is the beats
+      Mux(refill_one_beat, (refill_idx << log2Ceil(refillCycles)) | refill_cnt,
+      // ITIM write.
+                  Mux(s3_slaveValid, row(s1s3_slaveAddr),
+      // ITIM read.
+                  Mux(s0_slaveValid, row(s0_slaveAddr),
+      // CPU read.
+                  row(s0_vaddr))))
+    when (wen) {
+      //wr_data
+      val data = Mux(s3_slaveValid, s1s3_slaveData, tl_out.d.bits.data(wordBits*(i+1)-1, wordBits*i))
+      //the way to be replaced/written
+      val way = Mux(s3_slaveValid, scratchpadWay(s1s3_slaveAddr), repl_way)
+      data_array.write(mem_idx, VecInit(Seq.fill(nWays){dECC.encode(data)}), (0 until nWays).map(way === _.U))
+    }
+    // write access
+    /** data read from [[data_array]]. */
+    val dout = data_array.read(mem_idx, !wen && s0_ren)
+    // Mux to select a way to [[s1_dout]]
+    when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, io.s1_paddr))) {
+      s1_dout := dout
+    }
+  }
+
+  /** When writing full words to ITIM, ECC errors are correctable.
+    * When writing a full scratchpad word, suppress the read so Xs don't leak out
+    */
+  val s1s2_full_word_write = WireDefault(false.B)
+  val s1_dont_read = s1_slaveValid && s1s2_full_word_write
+
+  /** clock gate signal for [[s2_tag_hit]], [[s2_dout]], [[s2_tag_disparity]], [[s2_tl_error]], [[s2_scratchpad_hit]]. */
+  val s1_clk_en = s1_valid || s1_slaveValid
+  val s2_tag_hit = RegEnable(Mux(s1_dont_read, 0.U.asTypeOf(s1_tag_hit), s1_tag_hit), s1_clk_en)
+  /** way index to access [[data_arrays]]. */
+  val s2_hit_way = OHToUInt(s2_tag_hit)
+  /** ITIM index to access [[data_arrays]].
+    * replace tag with way, word set to 0.
+    */
+  val s2_scratchpad_word_addr = Cat(s2_hit_way, Mux(s2_slaveValid, s1s3_slaveAddr, io.s2_vaddr)(untagBits-1, log2Ceil(wordBits/8)), 0.U(log2Ceil(wordBits/8).W))
+  val s2_dout = RegEnable(s1_dout, s1_clk_en)
+  val s2_way_mux = Mux1H(s2_tag_hit, s2_dout)
+  val s2_tag_disparity = RegEnable(s1_tag_disparity, s1_clk_en).asUInt.orR
+  val s2_tl_error = RegEnable(s1_tl_error.asUInt.orR, s1_clk_en)
+  /** ECC decode result for [[data_arrays]]. */
+  val s2_data_decoded = dECC.decode(s2_way_mux)
+  /** ECC error happened, correctable or uncorrectable, ask CPU to replay. */
+  val s2_disparity = s2_tag_disparity || s2_data_decoded.error
+  /** access hit in ITIM, if [[s1_slaveValid]], this access is from [[tl_in]], else from CPU [[io]]. */
+    */
+  val s2_report_uncorrectable_error = s2_scratchpad_hit && s2_data_decoded.uncorrectable && (s2_valid || (s2_slaveValid && !s1s2_full_word_write))
+  /** ECC uncorrectable address, send to Bus Error Unit. */
+  val s2_error_addr = scratchpadBase.map(base => Mux(s2_scratchpad_hit, base + s2_scratchpad_word_addr, 0.U)).getOrElse(0.U)
+
+      require(tECC.isInstanceOf[IdentityCode])
+      require(dECC.isInstanceOf[IdentityCode])
+      require(outer.icacheParams.itimAddr.isEmpty)
+      // reply data to CPU at stage 2. no replay.
+      io.resp.bits.data := Mux1H(s1_tag_hit, s1_dout)
+      io.resp.bits.ae := s1_tl_error.asUInt.orR
+      io.resp.valid := s1_valid && s1_hit
+      io.resp.bits.replay := false.B
+   
+  tl_out.a.valid := s2_request_refill
+  tl_out.a.bits := edge_out.Get(
+                    fromSource = 0.U,
+                    toAddress = (refill_paddr >> blockOffBits) << blockOffBits,
+                    lgSize = lgCacheBlockBytes.U)._2
+  // Drive APROT information
+  tl_out.a.bits.user.lift(AMBAProt).foreach { x =>
+    // Rocket caches all fetch requests, and it's difficult to differentiate privileged/unprivileged on
+    // cached data, so mark as privileged
+    x.fetch       := true.B
+    x.secure      := true.B
+    x.privileged  := true.B
+    x.bufferable  := true.B
+    x.modifiable  := true.B
+    x.readalloc   := io.s2_cacheable
+    x.writealloc  := io.s2_cacheable
+  }
+  tl_out.b.ready := true.B
+  tl_out.c.valid := false.B
+  tl_out.e.valid := false.B
+  assert(!(tl_out.a.valid && addrMaybeInScratchpad(tl_out.a.bits.address)))
+
+  // if there is an outstanding refill, cannot flush I$.
+  when (!refill_valid) { invalidated := false.B }
+  when (refill_fire) { refill_valid := true.B }
+  when (refill_done) { refill_valid := false.B}
+
+  io.perf.acquire := refill_fire
+  // don't gate I$ clock since there are outstanding transcations.
+  io.keep_clock_enabled :=
+    tl_in.map(tl => tl.a.valid || tl.d.valid || s1_slaveValid || s2_slaveValid || s3_slaveValid).getOrElse(false.B) || // ITIM
+    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding // I$
+  def index(vaddr: UInt, paddr: UInt) = {
+    /** [[paddr]] as LSB to be used for VIPT. */
+    val lsbs = paddr(pgUntagBits-1, blockOffBits)
+    /** if [[untagBits]] > [[pgIdxBits]], append [[vaddr]] to higher bits of index as [[msbs]]. */
+    val msbs = (idxBits+blockOffBits > pgUntagBits).option(vaddr(idxBits+blockOffBits-1, pgUntagBits))
+    msbs ## lsbs
+  }
+
+  ccover(!send_hint && (tl_out.a.valid && !tl_out.a.ready), "MISS_A_STALL", "I$ miss blocked by A-channel")
+  ccover(invalidate && refill_valid, "FLUSH_DURING_MISS", "I$ flushed during miss")
+
+  def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
+    property.cover(cond, s"ICACHE_$label", "MemorySystem;;" + desc)
+
+  val mem_active_valid = Seq(property.CoverBoolean(s2_valid, Seq("mem_active")))
+  val data_error = Seq(
+    property.CoverBoolean(!s2_data_decoded.correctable && !s2_data_decoded.uncorrectable, Seq("no_data_error")),
+    property.CoverBoolean(s2_data_decoded.correctable, Seq("data_correctable_error")),
+    property.CoverBoolean(s2_data_decoded.uncorrectable, Seq("data_uncorrectable_error")))
+  val request_source = Seq(
+    property.CoverBoolean(!s2_slaveValid, Seq("from_CPU")),
+    property.CoverBoolean(s2_slaveValid, Seq("from_TL"))
+  )
+  val tag_error = Seq(
+    property.CoverBoolean(!s2_tag_disparity, Seq("no_tag_error")),
+    property.CoverBoolean(s2_tag_disparity, Seq("tag_error"))
+  )
+  val mem_mode = Seq(
+    property.CoverBoolean(s2_scratchpad_hit, Seq("ITIM_mode")),
+    property.CoverBoolean(!s2_scratchpad_hit, Seq("cache_mode"))
+  )
+
+  val error_cross_covers = new property.CrossProperty(
+    Seq(mem_active_valid, data_error, tag_error, request_source, mem_mode),
+    Seq(
+      // tag error cannot occur in ITIM mode
+      Seq("tag_error", "ITIM_mode"),
+      // Can only respond to TL in ITIM mode
+      Seq("from_TL", "cache_mode")
+    ),
+    "MemorySystem;;Memory Bit Flip Cross Covers")
+
+  property.cover(error_cross_covers)
+}
+class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
+    with HasL1ICacheParameters {
+     
+    }
