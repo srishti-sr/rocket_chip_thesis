@@ -244,7 +244,7 @@ class ICacheBundle(val outer: ICache) extends CoreBundle()(outer.p) {
 
 class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
-  override val cacheParams = outer.icacheParams.copy(nways = outer.icacheParams.nways / 2))// Use the local parameters
+  override val cacheParams = outer.icacheParams.copy(nways = outer.icacheParams.nways / 2,pgIdxBits=outer.icacheParams.pgIdxBits/2))// Use the local parameters
   
   /** IO between Core and ICache. */
   val io = IO(new ICacheBundle(outer))
@@ -556,8 +556,26 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val dataOut1 = module1.io.output 
   val dataOut2 = module2.io.output
   val finalOutput = Mux(paddr(untagbits-1,untagbits-2), dataOut1, dataOut2)
-}
-     
+
+   val io = IO(new ICacheBundle(outer))
+   val (tl_out, edge_out) = outer.masterNode.out(0)
+   tl_out.a.valid := s2_request_refill
+   tl_out.a.bits := edge_out.Get(
+                    fromSource = 0.U,
+                    toAddress = (refill_paddr >> blockOffBits) << blockOffBits,
+                    lgSize = lgCacheBlockBytes.U)._2
+   // Drive APROT information
+  tl_out.a.bits.user.lift(AMBAProt).foreach { x =>
+    // Rocket caches all fetch requests, and it's difficult to differentiate privileged/unprivileged on
+    // cached data, so mark as privileged
+    x.fetch       := true.B
+    x.secure      := true.B
+    x.privileged  := true.B
+    x.bufferable  := true.B
+    x.modifiable  := true.B
+    x.readalloc   := io.s2_cacheable
+    x.writealloc  := io.s2_cacheable
+  }
   def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
     property.cover(cond, s"ICACHE_$label", "MemorySystem;;" + desc)
 
