@@ -526,8 +526,13 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
    // notify CPU, I$ has corrupt.
   io.errors.bus.valid := tl_out.d.fire && (tl_out.d.bits.denied || tl_out.d.bits.corrupt)
   io.errors.bus.bits  := (refill_paddr >> blockOffBits) << blockOffBits
-
-   tl_out.a.valid := s2_request_refill
+     
+  io.resp.bits.data := Mux(io.req.addr,module1.io.resp.bits.data,module2.io.resp.bits.data)
+  io.resp.bits.ae := false.B
+  io.resp.valid := (module1.s1_valid && module1.s1_hit) || (module2.s1_valid && module2.s1_hit)
+  io.resp.bits.replay := false.B
+     
+   tl_out.a.valid := module1.s2_request_refill||module2.s2_request_refill
    tl_out.a.bits := edge_out.Get(
                     fromSource = 0.U,
                     toAddress = (refill_paddr >> blockOffBits) << blockOffBits,
@@ -554,12 +559,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   when (refill_fire) { refill_valid := true.B }
   when (refill_done) { refill_valid := false.B}
   io.perf.acquire := module1.io.perf.acquire || module2.io.perf.acquire
- 
   io.keep_clock_enabled :=module1.io.keep_clock_enabled || module2.io.keep_clock_enabled
-  io.resp.bits.data := Mux(io.req.,module1.io.resp.bits.data,module2.io.resp.bits.data)
-  io.resp.bits.ae := false.B
-  io.resp.valid := (module1.s1_valid && module1.s1_hit) || (module2.s1_valid && module2.s1_hit)
-  io.resp.bits.replay := false.B
   
    
   def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
