@@ -248,12 +248,8 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
   
   /** IO between Core and ICache. */
   val io = IO(new ICacheBundle(outer))
-
-  /** TileLink port to memory. */
   val (tl_out, edge_out) = outer.masterNode.out(0)
-
-  val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
-
+   val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
   val tECC = cacheParams.tagCode
   val dECC = cacheParams.dataCode
 
@@ -317,14 +313,13 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
   val refill_one_beat = tl_out.d.fire && edge_out.hasData(tl_out.d.bits)
 
   /** block request from CPU when refill or scratch pad access. */
-  io.req.ready := !(refill_one_beat || s0_slaveValid || s3_slaveValid)
+  io.req.ready := !(refill_one_beat)
   s1_valid := s0_valid
 
   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
   /** at last beat of `tl_out.d.fire`, finish refill. */
   val refill_done = refill_one_beat && d_done
-  /** scratchpad is writing data. block refill. */
-  tl_out.d.ready := !s3_slaveValid
+
   require (edge_out.manager.minLatency > 0)
 
   /** way to be replaced, implemented with a hardcoded random replacement algorithm */
@@ -506,38 +501,10 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
       io.resp.valid := s1_valid && s1_hit
       io.resp.bits.replay := false.B
    
-  tl_out.a.valid := s2_request_refill
-  tl_out.a.bits := edge_out.Get(
-                    fromSource = 0.U,
-                    toAddress = (refill_paddr >> blockOffBits) << blockOffBits,
-                    lgSize = lgCacheBlockBytes.U)._2
-  // Drive APROT information
-  tl_out.a.bits.user.lift(AMBAProt).foreach { x =>
-    // Rocket caches all fetch requests, and it's difficult to differentiate privileged/unprivileged on
-    // cached data, so mark as privileged
-    x.fetch       := true.B
-    x.secure      := true.B
-    x.privileged  := true.B
-    x.bufferable  := true.B
-    x.modifiable  := true.B
-    x.readalloc   := io.s2_cacheable
-    x.writealloc  := io.s2_cacheable
-  }
-  tl_out.b.ready := true.B
-  tl_out.c.valid := false.B
-  tl_out.e.valid := false.B
-  assert(!(tl_out.a.valid && addrMaybeInScratchpad(tl_out.a.bits.address)))
-
-  // if there is an outstanding refill, cannot flush I$.
-  when (!refill_valid) { invalidated := false.B }
-  when (refill_fire) { refill_valid := true.B }
-  when (refill_done) { refill_valid := false.B}
-
   io.perf.acquire := refill_fire
   // don't gate I$ clock since there are outstanding transcations.
   io.keep_clock_enabled :=
-    tl_in.map(tl => tl.a.valid || tl.d.valid || s1_slaveValid || s2_slaveValid || s3_slaveValid).getOrElse(false.B) || // ITIM
-    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding // I$
+    s1_valid || s2_valid || refill_valid || send_hint || hint_outstanding 
   def index(vaddr: UInt, paddr: UInt) = {
     /** [[paddr]] as LSB to be used for VIPT. */
     val lsbs = paddr(pgUntagBits-1, blockOffBits)
@@ -558,8 +525,14 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val dataOut2 = module2.io.output
   val finalOutput = Mux(paddr(untagbits-1,untagbits-2), dataOut1, dataOut2)
 
- 
    val (tl_out, edge_out) = outer.masterNode.out(0)
+   val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
+   io.req.ready := module1.io.req.ready && module2.io.req.ready
+   val (_, _, d_done, refill_cnt) = edge_out.count(tl_out.d)
+   // notify CPU, I$ has corrupt.
+  io.errors.bus.valid := tl_out.d.fire && (tl_out.d.bits.denied || tl_out.d.bits.corrupt)
+  io.errors.bus.bits  := (refill_paddr >> blockOffBits) << blockOffBits
+
    tl_out.a.valid := s2_request_refill
    tl_out.a.bits := edge_out.Get(
                     fromSource = 0.U,
@@ -577,6 +550,19 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     x.readalloc   := io.s2_cacheable
     x.writealloc  := io.s2_cacheable
   }
+  tl_out.b.ready := true.B
+  tl_out.c.valid := false.B
+  tl_out.e.valid := false.B
+  assert(!(tl_out.a.valid))
+
+  // if there is an outstanding refill, cannot flush I$.
+  when (!refill_valid) { invalidated := false.B }
+  when (refill_fire) { refill_valid := true.B }
+  when (refill_done) { refill_valid := false.B}
+  io.perf.acquire := module1.io.perf.acquire || module2.io.perf.acquire
+ 
+  io.keep_clock_enabled :=module1.io.keep_clock_enabled || module2.io.keep_clock_enabled
+   
   def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
     property.cover(cond, s"ICACHE_$label", "MemorySystem;;" + desc)
 
