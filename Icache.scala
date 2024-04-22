@@ -458,14 +458,11 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
     /** data read from [[data_array]]. */
     val dout = data_array.read(mem_idx, !wen && s0_ren)
     // Mux to select a way to [[s1_dout]]
-    when (wordMatch(Mux(s1_slaveValid, s1s3_slaveAddr, io.s1_paddr))) {
+    when (wordMatch(io.s1_paddr))) {
       s1_dout := dout
     }
   }
 
-  /** When writing full words to ITIM, ECC errors are correctable.
-    * When writing a full scratchpad word, suppress the read so Xs don't leak out
-    */
   val s1s2_full_word_write = WireDefault(false.B)
   val s1_dont_read = s1_slaveValid && s1s2_full_word_write
 
@@ -521,10 +518,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val io = IO(new ICacheBundle(outer))
   val module1 = new ICacheModule_1(outer)
   val module2 = new ICacheModule_1(outer)
-  val dataOut1 = module1.io.output 
-  val dataOut2 = module2.io.output
-  val finalOutput = Mux(paddr(untagbits-1,untagbits-2), dataOut1, dataOut2)
-
+ 
    val (tl_out, edge_out) = outer.masterNode.out(0)
    val (tl_in, edge_in) = outer.slaveNode.in.headOption.unzip
    io.req.ready := module1.io.req.ready && module2.io.req.ready
@@ -562,7 +556,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   io.perf.acquire := module1.io.perf.acquire || module2.io.perf.acquire
  
   io.keep_clock_enabled :=module1.io.keep_clock_enabled || module2.io.keep_clock_enabled
-  io.resp.bits.data := Mux1H(s1_tag_hit, s1_dout)
+  io.resp.bits.data := Mux(io.req.,module1.io.resp.bits.data,module2.io.resp.bits.data)
   io.resp.bits.ae := false.B
   io.resp.valid := (module1.s1_valid && module1.s1_hit) || (module2.s1_valid && module2.s1_hit)
   io.resp.bits.replay := false.B
