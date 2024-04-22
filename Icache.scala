@@ -551,13 +551,14 @@ class ICacheModule_1(outer: ICache) extends LazyModuleImp(outer)
 }
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     with HasL1ICacheParameters {
-  val module1 = new ICacheModule_1(this)
-  val module2 = new ICacheModule_1(this)
+  val io = IO(new ICacheBundle(outer))
+  val module1 = new ICacheModule_1(outer)
+  val module2 = new ICacheModule_1(outer)
   val dataOut1 = module1.io.output 
   val dataOut2 = module2.io.output
   val finalOutput = Mux(paddr(untagbits-1,untagbits-2), dataOut1, dataOut2)
 
-   val io = IO(new ICacheBundle(outer))
+ 
    val (tl_out, edge_out) = outer.masterNode.out(0)
    tl_out.a.valid := s2_request_refill
    tl_out.a.bits := edge_out.Get(
