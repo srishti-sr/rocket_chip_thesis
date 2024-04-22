@@ -562,6 +562,11 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   io.perf.acquire := module1.io.perf.acquire || module2.io.perf.acquire
  
   io.keep_clock_enabled :=module1.io.keep_clock_enabled || module2.io.keep_clock_enabled
+  io.resp.bits.data := Mux1H(s1_tag_hit, s1_dout)
+  io.resp.bits.ae := false.B
+  io.resp.valid := (module1.s1_valid && module1.s1_hit) || (module2.s1_valid && module2.s1_hit)
+  io.resp.bits.replay := false.B
+  
    
   def ccover(cond: Bool, label: String, desc: String)(implicit sourceInfo: SourceInfo) =
     property.cover(cond, s"ICACHE_$label", "MemorySystem;;" + desc)
