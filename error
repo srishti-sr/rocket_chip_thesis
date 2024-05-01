@@ -1,0 +1,43 @@
+@genus:root: 2> read_hdl /home/tcad/Desktop/srishti/work/ICache.v
+        automatic logic [255:0] _vb_array_T_3;	// src/main/scala/rocket/ICache.scala:444:32
+                                            |
+Error   : Parsing error. [VLOGPT-1] [read_hdl]
+        : Expecting token ';', found '<identifier>' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 394, column 45.
+        : Invalid Verilog syntax is parsed, or unsupported Verilog syntax is encountered.
+        _vb_array_T_3 = 256'h1 << {248'h0, repl_way, refill_idx};	// src/main/scala/rocket/ICache.scala:403:13, :444:32, :851:21
+        |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 395, column 9.
+        : Verilog module is using a parameter that is not defined in the module. You will get a notification for this, if you read the verilog file using the read_hdl command.
+          vb_array <= vb_array | _vb_array_T_3;	// src/main/scala/rocket/ICache.scala:440:25, :444:32
+                                 |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 397, column 34.
+          vb_array <= ~(~vb_array | _vb_array_T_3);	// src/main/scala/rocket/ICache.scala:440:25, :444:32
+                                    |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 399, column 37.
+1
+@genus:root: 3> read_hdl /home/tcad/Desktop/srishti/work/ICache.v
+        automatic logic [255:0] _vb_array_T_3;	// src/main/scala/rocket/ICache.scala:444:32
+                                            |
+Error   : Parsing error. [VLOGPT-1] [read_hdl]
+        : Expecting token ';', found '<identifier>' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 394, column 45.
+        _vb_array_T_3 = 256'h1 << {248'h0, repl_way, refill_idx};	// src/main/scala/rocket/ICache.scala:403:13, :444:32, :851:21
+        |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 395, column 9.
+          vb_array <= vb_array | _vb_array_T_3;	// src/main/scala/rocket/ICache.scala:440:25, :444:32
+                                 |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 397, column 34.
+          vb_array <= ~(~vb_array | _vb_array_T_3);	// src/main/scala/rocket/ICache.scala:440:25, :444:32
+                                    |
+Error   : Reference to undeclared variable. A variable/parameter must be declared before it is referenced. [VLOGPT-20] [read_hdl]
+        : Symbol '_vb_array_T_3' in file '/home/tcad/Desktop/srishti/work/ICache.v' on line 399, column 37.
+1
+@genus:root: 4> read_hdl -sv{/home/tcad/Desktop/srishti/work/ICache.v}
+Warning : Cannot open file. [VLOGPT-650]
+        : File '-sv{/home/tcad/Desktop/srishti/work/ICache.v}'.
+        : The specified file could not be opened.  Check the value of the init_hdl_search_path attribute.
+@genus:root: 5> 
